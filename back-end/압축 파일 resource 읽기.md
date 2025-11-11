@@ -1,10 +1,21 @@
-maven repository에서 commons-compress 라이브러리 (1.27.1 버전) 다운로드 후 로컬 maven repository에 넣고 pom.xml에 다음을 추가한다.
+maven repository에서 다음 라이브러리를 다운로드 후 로컬 maven repository에 넣고 pom.xml에 다음을 추가한다.
+
+commons-compress 1.27.1
+commons-io 2.20.0
+
+주의: commons-io 라이브러리가 없어도 컴파일 에러는 발생하지 않으나, ClassNotFoundException이 발생한다. (BoundedInputStream 못찾음)
+
 
 ``` xml
 <dependency>
 	<groupId>org.apache.commons</groupId>
 	<artifactId>commons-compress</artifactId>
 	<version>1.27.1</version>
+</dependency>
+<dependency>
+	<groupId>org.apache.commons</groupId>
+	<artifactId>commons-io</artifactId>
+	<version>2.20.0</version>
 </dependency>
 ```
 
