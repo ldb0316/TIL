@@ -1,4 +1,4 @@
-# Spring batch 를 이용한 스케줄러 구현
+# Spring batch 를 이용한 스케줄러 구현 (Job 구현 위주. Quartz는 따로 X)
 
 ## 1. Spring batch Job (Quartz) 흐름도
 
@@ -34,31 +34,6 @@ reader는 특정 resource(DB 데이터, 로컬 파일 등)을 읽어 item(DTO클
 때문에 파일명에 있는 특정 값을 추출하는 로직이 포함된다.
 
 ```java
-package myapp.scheduler.domain.test;
-
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Queue;
-import org.springframework.batch.item.ItemReader;
-import org.springframework.batch.item.NonTransientResourceException;
-import org.springframework.batch.item.ParseException;
-import org.springframework.batch.item.UnexpectedInputException;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.Resource;
-import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
-import org.springframework.stereotype.Component;
-import myapp.scheduler.global.util.CustomDateUtils;
-import myapp.scheduler.global.util.LinkEntityUtils;
-import myapp.scheduler.global.util.TSIDGenerator;
-import myapp.scheduler.global.util.batch.io.Decompressor;
-import lombok.extern.slf4j.Slf4j;
-
 /**
  * 파일명에 붙은 문자열을 item에 넣어 처리하기 위한 custom ItemReader 구현
  *
@@ -185,6 +160,192 @@ Custom ItemReader는 org.springframework.batch.item.ItemReader 인터페이스 �
 실행 구조는 read()가 null을 return 할때까지 반복해서 실행한다.<br>
 때문에 조건을 잘 주어 올바른 시점에 null을 return 하도록 유도해야 한다.
 
+<hr>
+
 ### 2. Processor
 
+processor는 reader에서 리소스를 읽어 만들어준 item을 받아 추가적인 처리 작업을 수행할 수 있다. <br>
+item의 특정 값을 기준으로 다른 값을 변경한다던가 하는 처리가 가능하다. <br>
+다음은 item에 좌표정보(경도,위도)가 들어있을 때, 올바르지 않은 좌표정보를 가진 item을 filtering하는 processor 구현 예제이다.
+
+```java
+/**
+ * custom item processor 구현
+ * 유효하지 않은 좌표값을 필터링하기 위해 구현함
+ * null 리턴 시 해당 item은 넘기지 않음 판정 -> 필터링됨
+ *
+ * @author LDB
+ *
+ */
+@Component
+public class TestItemProcessor implements ItemProcessor<TestInfo, TestInfo> {
+
+  @Override
+  public TestInfo process(TestInfo item) throws Exception {
+    if (item.getXcrd().equals("0.0") || item.getYcrd().equals("0.0"))
+      return null; //null을 return할 경우 해당 item은 필터링된다.
+    return item;
+  }
+
+}
+
+```
+
+이 외에도 item에 특정 값을 세팅하거나, 다양한 작업이 가능하다. <br>
+DDD방식으로 Item에 다양한 업무 로직 함수를 정의하여 프로세서를 통해 자동처리도 구현 가능할듯 하다.
+
+<hr>
+
 ### 3. Writer
+
+writer는 reader, processor step을 거쳐온 item들을 write하는 단계이다.<br>
+아래는 DB에 item을 넣는 예제이다.
+
+```java
+  @RequiredArgsConstructor
+  class TestItemWriter<TestInfo> implements ItemWriter<TestInfo> {
+
+    private final JdbcTemplate jdbcTemplate;
+
+    @Override
+    public void write(List<TestInfo> items) throws Exception {
+
+      // reader 에서 읽어온 데이터를 insert 한다.
+      JdbcQuery query = PGQueryBuilder.insertLink(items);
+      jdbcTemplate.update(query.sql(), query.params().toArray());
+    }
+  }
+```
+
+### 4. StepBuilder
+
+read, process, write Step을 구성했으면 이제 해당 스텝들을 하나로 모아 TaskletStep을 만들어주어야 한다.<br>
+아래는 StepBuilder를 이용하는 예제이다.
+
+```java
+
+  //testItemReader, testItemProcessor, testItemWriter 는 Spring bean으로 자동주입받은것을활용
+  ItemReader<TestInfo> reader = (ItemReader<TestInfo>) testItemReader;
+  ItemProcessor<TestInfo, TestInfo> processor = (ItemProcessor<TestInfo, TestInfo>) testItemProcessor;
+  ItemWriter<TestInfo> writer = (ItemWriter<TestInfo>) testItemWriter; // DB에 읽어온 데이터를 저장하는 로직(실행은 step에서)
+
+  // work step 을 만든다.
+  SimpleStepBuilder<TestInfo, TestInfo> stepBuilder = stepBuilderFactory.get("StepName").<TestInfo, TestInfo>chunk(chunkSize).reader(reader).processor(processor).writer(writer);
+
+```
+
+SimpleStepBuilder에서 지정하는 chunk는 item을 처리할 때 안정성을 유지하기 위해 지정하는 처리 단위이다.<br>
+StepName은 Spring의 StepBuilderFactory bean에서 StepBuilder를 가져올 때 해당 bulider의 name을 지정한다.
+
+## 3. Listener
+
+### 1. 리스너 등록
+
+listener는 해당 Job이 완료되는 시점이나 Step이 완료된 시점에서 별도 Job을 실행할 수 있게 해준다.
+
+```java
+
+JobFlowBuilder jobBuilder = jobBuilderFactory.get(jobName) // jobName에 해당하는 job 생성
+        .listener(new TestInfoBatchJobCompletionListener(jobLauncher, pgUpdateQueryBatchJob)) // job이 실행되고 끝났을 때 호출되는
+                                                                                                   // 리스너 등록. job 완료 후
+                                                                                                   // TestInfoBatchJobCompletionListener
+                                                                                                   // 후처리 수행됨
+        .flow(stepBuilder.listener(new CommonStepCompletionListener()).build());
+```
+
+jobBuilder의 listener에 해당 Job이 완료되는 시점에 실행할 Listener를 등록한다.<br>
+.flow 부분을 보면 알 수 있듯이 stepBuilder에도 listener를 등록할 수 있고, step이 완료될 때 마다 해당 Listener가 실행된다.
+
+### 2. 리스너 구현
+
+CommonJobCompletionListener를 상속하여 구현한다.
+아래는 afterJob 함수에서 jobExecution을 인자로 받아 성공적으로 Job이 완료되었는지 확인 후 다시 다음 job을 호출하는 예제이다.
+
+```java
+@RequiredArgsConstructor
+public class TestInfoBatchJobCompletionListener extends CommonJobCompletionListener {
+
+  private final JobLauncher jobLauncher;
+
+  private final PGUpdateQueryBatchJob pgUpdateQueryBatchJob;
+
+  @Override
+  public void afterJob(JobExecution jobExecution) {
+    super.afterJob(jobExecution);
+    if (jobExecution.getStatus() == BatchStatus.COMPLETED) {
+
+      String formattedJobId =
+          TestInfo.class.getSimpleName() + "_" + "runAfterFileToDbBatchJob" + "_" + CustomDateUtils.getLogFormatCurrentDateTime();
+      JobParameters params = new JobParametersBuilder().addString("jobId", formattedJobId).toJobParameters();
+      try {
+        jobLauncher.run(pgUpdateQueryBatchJob.create(TestInfo.class), params);
+      } catch (JobExecutionAlreadyRunningException e) {
+        throw new RuntimeException("postGIS 쿼리 업데이트 중 오류 발생 JobExecutionAlreadyRunningException", e);
+      } catch (JobRestartException e) {
+        throw new RuntimeException("postGIS 쿼리 업데이트 중 오류 발생 JobRestartException", e);
+      } catch (JobInstanceAlreadyCompleteException e) {
+        throw new RuntimeException("postGIS 쿼리 업데이트 중 오류 발생 JobInstanceAlreadyCompleteException", e);
+      } catch (JobParametersInvalidException e) {
+        throw new RuntimeException("postGIS 쿼리 업데이트 중 오류 발생 JobParametersInvalidException", e);
+      }
+    }
+  }
+
+}
+```
+
+afterJob 뿐 만 아니라 beforeJob 함수도 Override하여 구현하면 해당 작업이 시작되기 전에 특정 로직을 실행시킬 수 있다.
+
+## 4. 추가 step 구현
+
+작업이 완전히 종료되고나서 추가적인 step이 필요할 수 있다.<br>
+연계 파일을 읽어서 전부 DB에 저장했다면, 해당 파일을 삭제하거나 backup 디렉토리로 옮기는 작업 등이 그렇다.
+
+```java
+
+    /** FileToDb 작업 후 해당 파일 삭제 (txt파일 삭제) */
+    String cleanupStepName = this.getClass().getSimpleName() + "CleanupStep[TestInfo]";
+    TaskletStepBuilder cleanupStepBuilder = stepBuilderFactory.get(cleanupStepName).tasklet(new CleanupTask());
+    jobBuilder.next(cleanupStepBuilder.build());
+
+
+```
+
+```java
+
+  @RequiredArgsConstructor
+  class CleanupTask<TestInfo> implements Tasklet {
+
+    private final Class<T> type;
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) throws Exception {
+      String fileName = "TestInfo";
+      try {
+        Resource[] resources = getResources(fileName, type); // 대충 압축 파일 풀고 했던 그 로직 재활용용
+        for (Resource resource : resources) {
+          if (resource.exists()) {
+            File file = resource.getFile();
+            if (!file.delete()) {
+              throw new RuntimeException("파일 삭제에 실패했습니다. file :" + file.getName());
+            }
+          }
+        }
+      } catch (Exception e) {
+        // 파일이 없더라도 멈추지 않도록
+        e.printStackTrace();
+      }
+
+      return RepeatStatus.FINISHED;
+    }
+  }
+
+```
+
+## 5. Job 마무리
+
+jobBuilder의 .build를 호출하여 Job을 생성하고 해당 Job을 Quartz Scheduler에 등록하면 된다.
+
+```java
+return jobBuilder.end().build();
+```
