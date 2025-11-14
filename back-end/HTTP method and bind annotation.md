@@ -14,6 +14,7 @@
 데이터를 삭제할 때 사용
 
 ## Bind Annotation
+
 ### @ModelAttribute
 ``` text
 쿼리 파라미터나 form에 의한 데이터(application/x-www-form-urlencoded)를 java 객체에 바인딩 할 때 사용한다.
