@@ -86,8 +86,7 @@ SecurityContextHolder.getContext().setAuthentication(authentication);
 
 2. Jwts builder 를 이용하여 authentication의 UserDetails를 토큰화 후 response로 전달
 
-3. 클라이언트단에서 새로운 request 요청이 발생하면 securityFilterChain 동작
-   기타 필터 내용은 기술안함.
+3. 클라이언트단에서 새로운 request 요청이 발생하면 securityFilterChain 동작.<br>기타 필터 내용은 기술안함.
 
 ```java
 // SecurityConfig.java
